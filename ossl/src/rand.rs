@@ -287,9 +287,45 @@ impl Drop for EvpRandCtx {
     }
 }
 
+/// Generates random bytes using the random number generator of the given
+/// library context. The `r#priv` boolean flag selects whether to use the
+/// private generator (intended for long term secrets like private keys) or
+/// the regular one.
+///
+/// Prefer this over [`get_random`] whenever a context is at hand: the
+/// non-`_ex` OpenSSL calls always draw from the global default context,
+/// regardless of the context the rest of an operation uses. That context may
+/// be configured differently or, on a system in FIPS mode, not configured at
+/// all: OpenSSL does not fall back to the built-in default provider there, so
+/// a context nobody loaded a configuration into holds no providers and the
+/// DRBG fetch fails with `EVP_R_UNSUPPORTED_ALGORITHM`.
+pub fn get_random_ex(
+    ctx: &OsslContext,
+    buf: &mut [u8],
+    r#priv: bool,
+) -> Result<(), Error> {
+    let ret = if r#priv {
+        unsafe { RAND_priv_bytes_ex(ctx.ptr(), buf.as_mut_ptr(), buf.len(), 0) }
+    } else {
+        unsafe { RAND_bytes_ex(ctx.ptr(), buf.as_mut_ptr(), buf.len(), 0) }
+    };
+    if ret != 1 {
+        if r#priv {
+            trace_ossl!("RAND_priv_bytes_ex()");
+        } else {
+            trace_ossl!("RAND_bytes_ex()");
+        }
+        return Err(Error::new(ErrorKind::OsslError));
+    }
+    Ok(())
+}
+
 /// Generates random bytes using the default OpenSSL random number generator.
 /// The `r#priv` boolean flag selects whether to use the private generator
 /// (intended for long term secrets like private keys) or the regular one.
+///
+/// This draws from the global default library context. Callers that own a
+/// context should use [`get_random_ex`] instead.
 #[cfg(not(feature = "fips"))]
 pub fn get_random(buf: &mut [u8], r#priv: bool) -> Result<(), Error> {
     let len = c_int::try_from(buf.len())?;

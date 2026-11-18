@@ -54,6 +54,9 @@ mod digest;
 #[cfg(all(ossl_v350, not(feature = "fips")))]
 mod mldsa;
 
+#[cfg(not(feature = "fips"))]
+mod rand;
+
 #[cfg(feature = "dynamic")]
 #[test]
 fn test_permissive_fips() {
