@@ -134,9 +134,63 @@ fn sigalg_is_oneshot(alg: SigAlg) -> bool {
     }
 }
 
+/// Helper that indicates if a signature algorithm can be driven through the
+/// legacy EVP_DigestSign/EVP_DigestVerify API, which takes the digest
+/// separately from the key algorithm.
+///
+/// Only the composite algorithms have an equivalent there. The digest-less
+/// ones -- one shot, ML-DSA, SLH-DSA -- do not, and must be refused rather
+/// than routed to an API that has no digest to give.
+///
+/// Only consulted from 3.5 onwards: below it, every algorithm that has a
+/// legacy equivalent already uses it unconditionally.
+#[cfg(ossl_v350)]
+fn sigalg_has_legacy_api(alg: SigAlg) -> bool {
+    !sigalg_to_digest_ptr(alg).is_null()
+}
+
+/// Helper that returns the key type signature implementation that the legacy
+/// API ends up fetching for a composite signature algorithm, the digest being
+/// fetched separately.
+///
+/// RSA-PSS is driven through the RSA implementation with pad mode parameters,
+/// so it maps there as well.
+fn sigalg_to_legacy_base(alg: SigAlg) -> Option<SigAlg> {
+    match alg {
+        SigAlg::EcdsaSha1
+        | SigAlg::EcdsaSha2_224
+        | SigAlg::EcdsaSha2_256
+        | SigAlg::EcdsaSha2_384
+        | SigAlg::EcdsaSha2_512
+        | SigAlg::EcdsaSha3_224
+        | SigAlg::EcdsaSha3_256
+        | SigAlg::EcdsaSha3_384
+        | SigAlg::EcdsaSha3_512 => Some(SigAlg::Ecdsa),
+        SigAlg::RsaSha1
+        | SigAlg::RsaSha2_224
+        | SigAlg::RsaSha2_256
+        | SigAlg::RsaSha2_384
+        | SigAlg::RsaSha2_512
+        | SigAlg::RsaSha3_224
+        | SigAlg::RsaSha3_256
+        | SigAlg::RsaSha3_384
+        | SigAlg::RsaSha3_512
+        | SigAlg::RsaPssSha1
+        | SigAlg::RsaPssSha2_224
+        | SigAlg::RsaPssSha2_256
+        | SigAlg::RsaPssSha2_384
+        | SigAlg::RsaPssSha2_512
+        | SigAlg::RsaPssSha3_224
+        | SigAlg::RsaPssSha3_256
+        | SigAlg::RsaPssSha3_384
+        | SigAlg::RsaPssSha3_512 => Some(SigAlg::Rsa),
+        _ => None,
+    }
+}
+
 /// Helper that indicates if a signature algorithm should use legacy apis
-fn sigalg_uses_legacy_api(alg: SigAlg) -> bool {
-    #[cfg(not(ossl_v350))]
+#[cfg(not(ossl_v350))]
+fn sigalg_uses_legacy_api(_ctx: &OsslContext, alg: SigAlg) -> bool {
     match alg {
         SigAlg::Ecdsa | SigAlg::Rsa | SigAlg::RsaPss | SigAlg::RsaNoPad => {
             false
@@ -156,7 +210,18 @@ fn sigalg_uses_legacy_api(alg: SigAlg) -> bool {
         | SigAlg::SlhdsaShake256f => false,
         _ => true,
     }
-    #[cfg(ossl_v350)]
+}
+
+/// Helper that indicates if a signature algorithm should use legacy apis
+///
+/// Composite signature algorithms ("RSA-SHA2-256" and friends) were added in
+/// OpenSSL 3.5, but they are implemented by the *provider*, not by libcrypto.
+/// A context served by an older provider cannot fetch them even when
+/// libcrypto is 3.5 or newer: RHEL 9 pairs libcrypto 3.5 with the frozen
+/// 3.0.7 FIPS module, so in FIPS mode none of these names resolve. Where the
+/// algorithm has a legacy equivalent, use it rather than failing.
+#[cfg(ossl_v350)]
+fn sigalg_uses_legacy_api(ctx: &OsslContext, alg: SigAlg) -> bool {
     match alg {
         SigAlg::RsaPssSha1
         | SigAlg::RsaPssSha2_224
@@ -167,7 +232,7 @@ fn sigalg_uses_legacy_api(alg: SigAlg) -> bool {
         | SigAlg::RsaPssSha3_256
         | SigAlg::RsaPssSha3_384
         | SigAlg::RsaPssSha3_512 => true,
-        _ => false,
+        _ => sigalg_has_legacy_api(alg) && !sigalg_fetchable(ctx, alg),
     }
 }
 
@@ -419,8 +484,9 @@ pub fn sigalg_to_evp_type(alg: SigAlg) -> Result<c_int, Error> {
     }
 }
 
-/// Checks if a signature algorithm is available
-pub fn available(ctx: &OsslContext, alg: SigAlg) -> bool {
+/// Helper that indicates if the EVP_SIGNATURE implementation named after a
+/// signature algorithm can be fetched from a context
+fn sigalg_fetchable(ctx: &OsslContext, alg: SigAlg) -> bool {
     let name = sigalg_to_ossl_name(alg);
     let ptr = unsafe {
         ERR_set_mark();
@@ -438,6 +504,50 @@ pub fn available(ctx: &OsslContext, alg: SigAlg) -> bool {
     } else {
         unsafe { EVP_SIGNATURE_free(ptr) };
         true
+    }
+}
+
+/// Helper that indicates if the digest a signature algorithm hands to the
+/// legacy API can be fetched from a context
+fn sigalg_digest_fetchable(ctx: &OsslContext, alg: SigAlg) -> bool {
+    let name = sigalg_to_digest_ptr(alg);
+    if name.is_null() {
+        return false;
+    }
+    let ptr = unsafe {
+        ERR_set_mark();
+        let p = EVP_MD_fetch(ctx.ptr(), name, ctx.propq_ptr());
+        ERR_pop_to_mark();
+        p
+    };
+
+    if ptr.is_null() {
+        false
+    } else {
+        unsafe { EVP_MD_free(ptr) };
+        true
+    }
+}
+
+/// Checks if a signature algorithm is available
+///
+/// What has to be available depends on which API the algorithm will be driven
+/// through, so this asks the same question `sigalg_uses_legacy_api()` answers:
+/// the composite implementation for the modern API, or the key type
+/// implementation plus the digest for the legacy one. Checking only the
+/// composite name would report every legacy algorithm as unavailable, which
+/// is what happens on any libcrypto older than 3.5 and on any context served
+/// by a provider older than 3.5.
+pub fn available(ctx: &OsslContext, alg: SigAlg) -> bool {
+    if !sigalg_uses_legacy_api(ctx, alg) {
+        return sigalg_fetchable(ctx, alg);
+    }
+
+    match sigalg_to_legacy_base(alg) {
+        Some(base) => {
+            sigalg_fetchable(ctx, base) && sigalg_digest_fetchable(ctx, alg)
+        }
+        None => false,
     }
 }
 
@@ -894,7 +1004,7 @@ impl OsslSignature {
             return Ok(ctx);
         }
 
-        if sigalg_uses_legacy_api(alg) {
+        if sigalg_uses_legacy_api(libctx, alg) {
             let params_ptr = match params {
                 Some(p) => p.as_ptr(),
                 None => std::ptr::null(),
