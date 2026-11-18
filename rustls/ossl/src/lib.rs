@@ -273,7 +273,20 @@ fn supported_cipher_suites() -> Vec<SupportedCipherSuite> {
         }
     }
 
+    if fips() {
+        suites.retain(|suite| !is_chacha20_poly1305_suite(suite.suite()));
+    }
+
     suites
+}
+
+fn is_chacha20_poly1305_suite(suite: CipherSuite) -> bool {
+    matches!(
+        suite,
+        CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+            | CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+            | CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+    )
 }
 
 pub(crate) fn fips() -> bool {
@@ -319,5 +332,21 @@ mod tests {
         let err = check_provider(&provider).unwrap_err().to_string();
         assert!(err.contains("cipher suites"), "{err}");
         assert!(err.contains("key exchange groups"), "{err}");
+    }
+
+    #[test]
+    fn chacha20_poly1305_aead_is_never_fips() {
+        assert!(!cipher::CHACHA20_POLY1305.fips_approved());
+        assert_eq!(cipher::AES_128_GCM.fips_approved(), fips());
+        assert_eq!(cipher::AES_256_GCM.fips_approved(), fips());
+    }
+
+    #[test]
+    fn chacha20_poly1305_suites_follow_context_fips_mode() {
+        let contains_chacha20_poly1305 = supported_cipher_suites()
+            .iter()
+            .any(|suite| is_chacha20_poly1305_suite(suite.suite()));
+
+        assert_eq!(contains_chacha20_poly1305, !fips());
     }
 }

@@ -50,7 +50,7 @@ impl Tls13AeadAlgorithm for AeadAlgorithm {
     }
 
     fn fips(&self) -> bool {
-        crate::fips()
+        self.fips_approved()
     }
 }
 
