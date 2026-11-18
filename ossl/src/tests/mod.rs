@@ -57,6 +57,9 @@ mod mldsa;
 #[cfg(not(feature = "fips"))]
 mod rand;
 
+#[cfg(not(feature = "fips"))]
+mod signature;
+
 #[cfg(feature = "dynamic")]
 #[test]
 fn test_permissive_fips() {
