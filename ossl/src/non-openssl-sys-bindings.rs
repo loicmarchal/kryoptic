@@ -183,6 +183,25 @@ pub const OSSL_MAC_PARAM_DIGEST: &[u8; 7] = b"digest\0";
 pub const OSSL_MAC_NAME_CMAC: &[u8; 5] = b"CMAC\0";
 pub const OSSL_MAC_NAME_HMAC: &[u8; 5] = b"HMAC\0";
 
+// Rand
+//
+// openssl-sys declares only the non-_ex functions, which are bound to the
+// global default library context.
+unsafe extern "C" {
+    pub fn RAND_bytes_ex(
+        ctx: *mut OSSL_LIB_CTX,
+        buf: *mut c_uchar,
+        num: usize,
+        strength: c_uint,
+    ) -> c_int;
+    pub fn RAND_priv_bytes_ex(
+        ctx: *mut OSSL_LIB_CTX,
+        buf: *mut c_uchar,
+        num: usize,
+        strength: c_uint,
+    ) -> c_int;
+}
+
 // Old openssl-sys is missing these
 pub const EVP_PKEY_PRIVATE_KEY: c_int = 133;
 pub const EVP_PKEY_PUBLIC_KEY: c_int = 134;
