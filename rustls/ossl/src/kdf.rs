@@ -45,6 +45,10 @@ impl Prf for OsslPrf {
         prf.add_seed(seed);
         prf.derive(output).expect("TLS1 PRF derivation failed");
     }
+
+    fn fips(&self) -> bool {
+        crate::fips()
+    }
 }
 
 #[cfg(feature = "tls12")]
@@ -102,6 +106,28 @@ impl Hkdf for OsslHkdf {
         message: &[u8],
     ) -> rustls::crypto::hmac::Tag {
         hmac::from_digest_key(self.0 .0, key.as_ref()).sign(&[message])
+    }
+
+    fn fips(&self) -> bool {
+        crate::fips()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hkdf_fips_status_matches_context() {
+        assert_eq!(HKDF_SHA256.fips(), crate::fips());
+        assert_eq!(HKDF_SHA384.fips(), crate::fips());
+    }
+
+    #[cfg(feature = "tls12")]
+    #[test]
+    fn prf_fips_status_matches_context() {
+        assert_eq!(PRF_SHA256.fips(), crate::fips());
+        assert_eq!(PRF_SHA384.fips(), crate::fips());
     }
 }
 
