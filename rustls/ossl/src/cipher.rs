@@ -15,6 +15,10 @@ pub struct AeadAlgorithm {
 }
 
 impl AeadAlgorithm {
+    pub(crate) fn fips_approved(&self) -> bool {
+        matches!(self.alg, EncAlg::AesGcm(_)) && crate::fips()
+    }
+
     pub fn encrypt_data(
         &self,
         key: &[u8],

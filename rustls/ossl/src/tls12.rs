@@ -101,7 +101,7 @@ impl Tls12AeadAlgorithm for AeadAlgorithm {
     }
 
     fn fips(&self) -> bool {
-        crate::fips()
+        self.fips_approved()
     }
 }
 
