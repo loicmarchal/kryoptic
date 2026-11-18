@@ -44,6 +44,12 @@ impl SecureRandom for OsslSecureRandom {
     }
 }
 
+/// Returns a provider built from whatever the library context can supply.
+///
+/// The key exchange groups and the signature verification algorithms are
+/// discovered by probing the context, so a context that cannot supply a class
+/// of algorithm yields an empty list rather than an error. Callers that would
+/// rather hear about that up front should use [`try_default_provider`].
 pub fn default_provider() -> CryptoProvider {
     CryptoProvider {
         cipher_suites: supported_cipher_suites(),
@@ -52,6 +58,57 @@ pub fn default_provider() -> CryptoProvider {
         secure_random: &OsslSecureRandom,
         key_provider: &pkey::OsslKeyProvider,
     }
+}
+
+/// Checks that a provider carries everything a handshake needs.
+///
+/// An empty component list is not rejected anywhere downstream. The FIPS
+/// flags do not reveal it either, since `CryptoProvider::fips()` and the
+/// per-component `fips()` are `all()` over those lists and report true when a
+/// list is empty. An empty set of signature verification algorithms is then
+/// encoded into the ClientHello as a zero length `signature_algorithms`
+/// vector, which peers reject with a `decode_error` alert: the handshake
+/// fails with nothing on either side naming the cause.
+fn check_provider(provider: &CryptoProvider) -> Result<(), rustls::Error> {
+    let mut missing = Vec::new();
+
+    if provider.cipher_suites.is_empty() {
+        missing.push("cipher suites");
+    }
+    if provider.kx_groups.is_empty() {
+        missing.push("key exchange groups");
+    }
+    if provider.signature_verification_algorithms.all.is_empty()
+        || provider
+            .signature_verification_algorithms
+            .mapping
+            .is_empty()
+    {
+        missing.push("signature verification algorithms");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(rustls::Error::General(format!(
+        "the OpenSSL library context supplies no {}",
+        missing.join(", and no ")
+    )))
+}
+
+/// Returns the default provider, or an error naming what the library context
+/// could not supply.
+///
+/// Fetches are answered by the providers active in the context and filtered
+/// by its default properties, so the outcome depends on how the context was
+/// configured rather than on how this crate was built. A context in FIPS mode
+/// served by a module that implements fewer algorithms than libcrypto knows
+/// about is the case worth guarding against.
+pub fn try_default_provider() -> Result<CryptoProvider, rustls::Error> {
+    let provider = default_provider();
+    check_provider(&provider)?;
+    Ok(provider)
 }
 
 #[cfg(feature = "tls12")]
@@ -221,4 +278,46 @@ fn supported_cipher_suites() -> Vec<SupportedCipherSuite> {
 
 pub(crate) fn fips() -> bool {
     osslctx().fips_is_enabled()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_default_provider() {
+        try_default_provider().expect("default provider is unusable");
+    }
+
+    #[test]
+    fn test_check_provider_rejects_empty_components() {
+        let mut provider = default_provider();
+        provider.cipher_suites.clear();
+        let err = check_provider(&provider).unwrap_err().to_string();
+        assert!(err.contains("cipher suites"), "{err}");
+
+        let mut provider = default_provider();
+        provider.kx_groups.clear();
+        let err = check_provider(&provider).unwrap_err().to_string();
+        assert!(err.contains("key exchange groups"), "{err}");
+
+        let mut provider = default_provider();
+        provider.signature_verification_algorithms =
+            rustls::crypto::WebPkiSupportedAlgorithms {
+                all: &[],
+                mapping: &[],
+            };
+        let err = check_provider(&provider).unwrap_err().to_string();
+        assert!(err.contains("signature verification algorithms"), "{err}");
+    }
+
+    #[test]
+    fn test_check_provider_names_every_missing_component() {
+        let mut provider = default_provider();
+        provider.cipher_suites.clear();
+        provider.kx_groups.clear();
+        let err = check_provider(&provider).unwrap_err().to_string();
+        assert!(err.contains("cipher suites"), "{err}");
+        assert!(err.contains("key exchange groups"), "{err}");
+    }
 }
