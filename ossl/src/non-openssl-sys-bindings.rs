@@ -63,8 +63,6 @@ pub const OSSL_DRBG_PARAM_RESEED_TIME_INTERVAL: &[u8; 21] =
 
 // Pkey
 pub const OSSL_PKEY_PARAM_GROUP_NAME: &[u8; 6] = b"group\0";
-pub const OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT: &[u8; 13] =
-    b"point-format\0";
 pub const OSSL_PKEY_PARAM_PUB_KEY: &[u8; 4] = b"pub\0";
 pub const OSSL_PKEY_PARAM_PRIV_KEY: &[u8; 5] = b"priv\0";
 
