@@ -282,22 +282,6 @@ fn pkey_type_to_params(
         }
     };
 
-    /* Ask for the uncompressed point form explicitly rather than taking
-     * whatever the provider defaults to. A curve key is exported in the form
-     * this parameter selects, and callers expect 0x04 || X || Y: PKCS #11
-     * carries CKA_EC_POINT that way, and RFC 8446 section 4.2.8.2 requires it
-     * of a TLS 1.3 key share, where peers that enforce it -- Go's crypto/tls
-     * among them -- answer a compressed point with an illegal_parameter
-     * alert. The default provider already hands back the uncompressed form,
-     * but the FIPS provider shipped on RHEL 9, frozen at 3.0.7 while
-     * libcrypto moves on, hands back the compressed one. */
-    if name == c"EC" {
-        params.add_const_c_string(
-            cstr!(OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT),
-            c"uncompressed",
-        )?;
-    }
-
     Ok(name)
 }
 
@@ -1507,6 +1491,31 @@ impl EvpPkey {
             trace_ossl!("EVP_PKEY_generate()");
             return Err(Error::new(ErrorKind::OsslError));
         }
+
+        /* A curve key is exported in the point form this parameter selects,
+         * and callers expect 0x04 || X || Y: PKCS #11 carries CKA_EC_POINT
+         * that way, and RFC 8446 section 4.2.8.2 requires it of a TLS 1.3 key
+         * share, where peers that enforce it answer a compressed point with
+         * an illegal_parameter alert. Left unset the choice belongs to the
+         * provider: the default one answers uncompressed, the FIPS provider
+         * RHEL 9 ships, frozen at 3.0.7 while libcrypto moves on, answers
+         * compressed. The parameter has to be set on the key, as the EC key
+         * generation accepts it but does not act on it. */
+        if name == c"EC" {
+            let res = unsafe {
+                EVP_PKEY_set_utf8_string_param(
+                    pkey,
+                    cstr!(OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT).as_ptr(),
+                    c"uncompressed".as_ptr(),
+                )
+            };
+            if res != 1 {
+                trace_ossl!("EVP_PKEY_set_utf8_string_param()");
+                unsafe { EVP_PKEY_free(pkey) };
+                return Err(Error::new(ErrorKind::OsslError));
+            }
+        }
+
         Ok(EvpPkey { ptr: pkey })
     }
 
