@@ -14,6 +14,81 @@ const MAX_SHARED_SECRET_SIZE: usize = 128;
 #[derive(Debug)]
 pub struct OsslEcKxGroup(pub NamedGroup);
 
+/// Size in bytes of one coordinate of a curve point, for the groups whose key
+/// exchange value is a point. `None` for the Montgomery curves, whose value is
+/// a bare scalar and must be passed through untouched.
+fn coordinate_len(group: NamedGroup) -> Option<usize> {
+    match group {
+        NamedGroup::secp256r1 => Some(32),
+        NamedGroup::secp384r1 => Some(48),
+        NamedGroup::secp521r1 => Some(66),
+        _ => None,
+    }
+}
+
+/// Returns the point in the uncompressed form, `0x04 || X || Y`.
+///
+/// RFC 8446 section 4.2.8.2 requires that form of a TLS 1.3 key share, and
+/// peers enforce it: Go's crypto/tls rejects anything else with an
+/// illegal_parameter alert. Which form a key exports in is the provider's
+/// choice, and not one it can be talked out of -- asking for "uncompressed"
+/// through the key generation parameters is ignored outright, and setting it
+/// on the generated key is honoured by the default provider but not by the
+/// FIPS module RHEL 9 ships, frozen at 3.0.7 while libcrypto moves on.
+///
+/// So rather than ask, rebuild: the coordinates are readable from the key
+/// whatever form the encoded point took.
+fn uncompressed_point(
+    group: NamedGroup,
+    key: &EvpPkey,
+    point: Vec<u8>,
+) -> Result<Vec<u8>, Error> {
+    let len = match coordinate_len(group) {
+        Some(len) => len,
+        None => return Ok(point),
+    };
+
+    if point.first() == Some(&0x04) && point.len() == 1 + 2 * len {
+        return Ok(point);
+    }
+
+    /* The buffers are sizing hints: get_params() fills them in place, so they
+     * have to be wide enough for any coordinate we support. */
+    let x_buffer = [0xff; 128];
+    let y_buffer = [0xff; 128];
+    let mut params = {
+        let mut builder = ossl::OsslParamBuilder::with_capacity(2);
+        builder
+            .add_bn(c"qx", &x_buffer)
+            .and_then(|()| builder.add_bn(c"qy", &y_buffer))
+            .map_err(|_| {
+                Error::General("Failed to request KX coordinates".into())
+            })?;
+        builder.finalize()
+    };
+    key.get_params(&mut params)
+        .map_err(|_| Error::General("Failed to read KX coordinates".into()))?;
+    let x = params.get_bn(c"qx").map_err(|_| {
+        Error::General("Failed to decode KX x coordinate".into())
+    })?;
+    let y = params.get_bn(c"qy").map_err(|_| {
+        Error::General("Failed to decode KX y coordinate".into())
+    })?;
+
+    if x.len() > len || y.len() > len {
+        return Err(Error::General("KX point is too large".into()));
+    }
+
+    /* Left pad each coordinate to the fixed width the curve calls for: a
+     * BIGNUM carries no leading zeros, and P-521 produces one most of the
+     * time, its top byte holding a single significant bit. */
+    let mut encoded = vec![0u8; 1 + 2 * len];
+    encoded[0] = 0x04;
+    encoded[1 + len - x.len()..1 + len].copy_from_slice(&x);
+    encoded[1 + 2 * len - y.len()..].copy_from_slice(&y);
+    Ok(encoded)
+}
+
 impl SupportedKxGroup for OsslEcKxGroup {
     fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, Error> {
         let key_type = match self.0 {
@@ -38,6 +113,8 @@ impl SupportedKxGroup for OsslEcKxGroup {
             _ => None,
         }
         .ok_or_else(|| Error::General("Failed to get KX public key".into()))?;
+
+        let pubkey = uncompressed_point(self.0, &privkey, pubkey)?;
 
         Ok(Box::new(OsslEcdh {
             group: self.0,
@@ -250,6 +327,50 @@ pub fn supported_kx_groups() -> Vec<&'static dyn SupportedKxGroup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A point the provider hands back compressed still has to leave as a
+    /// key share in the uncompressed form. The FIPS module this was found
+    /// against does exactly that; here the format has to be forced onto the
+    /// key to reproduce it, since the default provider does not.
+    #[test]
+    fn test_compressed_point_is_expanded() {
+        for (group, key_type, coordinate_len) in [
+            (NamedGroup::secp256r1, EvpPkeyType::P256, 32),
+            (NamedGroup::secp384r1, EvpPkeyType::P384, 48),
+            (NamedGroup::secp521r1, EvpPkeyType::P521, 66),
+        ] {
+            let mut key = EvpPkey::generate(osslctx(), key_type).unwrap();
+            let ret = unsafe {
+                ossl::bindings::EVP_PKEY_set_utf8_string_param(
+                    key.as_mut_ptr(),
+                    c"point-format".as_ptr(),
+                    c"compressed".as_ptr(),
+                )
+            };
+            assert_eq!(ret, 1, "could not force the compressed form");
+
+            let compressed = match key.export_public() {
+                Ok(PkeyData::Ecc(ecc)) => ecc.pubkey.clone().unwrap(),
+                _ => panic!("no public key"),
+            };
+            assert!(
+                matches!(compressed.first(), Some(0x02 | 0x03)),
+                "{group:?} was not exported compressed, nothing to expand"
+            );
+
+            let expanded =
+                uncompressed_point(group, &key, compressed.clone()).unwrap();
+            assert_eq!(expanded.first(), Some(&0x04), "{group:?}");
+            assert_eq!(expanded.len(), 1 + 2 * coordinate_len, "{group:?}");
+            /* the X coordinate is carried over unchanged from the
+             * compressed form */
+            assert_eq!(
+                &expanded[1..1 + coordinate_len],
+                &compressed[1..],
+                "{group:?} x coordinate was not preserved"
+            );
+        }
+    }
 
     /// RFC 8446 section 4.2.8.2 requires the key_exchange field of a
     /// TLS 1.3 key share to carry the uncompressed form of the point,

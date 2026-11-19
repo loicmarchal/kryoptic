@@ -1502,10 +1502,11 @@ impl EvpPkey {
          * compressed. The parameter has to be set on the key, as the EC key
          * generation accepts it but does not act on it. */
         if name == c"EC" {
+            let format = cstr!(OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT);
             let res = unsafe {
                 EVP_PKEY_set_utf8_string_param(
                     pkey,
-                    cstr!(OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT).as_ptr(),
+                    format.as_ptr(),
                     c"uncompressed".as_ptr(),
                 )
             };
