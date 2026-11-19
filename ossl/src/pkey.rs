@@ -281,6 +281,23 @@ fn pkey_type_to_params(
             c"DSA"
         }
     };
+
+    /* Ask for the uncompressed point form explicitly rather than taking
+     * whatever the provider defaults to. A curve key is exported in the form
+     * this parameter selects, and callers expect 0x04 || X || Y: PKCS #11
+     * carries CKA_EC_POINT that way, and RFC 8446 section 4.2.8.2 requires it
+     * of a TLS 1.3 key share, where peers that enforce it -- Go's crypto/tls
+     * among them -- answer a compressed point with an illegal_parameter
+     * alert. The default provider already hands back the uncompressed form,
+     * but the FIPS provider shipped on RHEL 9, frozen at 3.0.7 while
+     * libcrypto moves on, hands back the compressed one. */
+    if name == c"EC" {
+        params.add_const_c_string(
+            cstr!(OSSL_PKEY_PARAM_EC_POINT_CONVERSION_FORMAT),
+            c"uncompressed",
+        )?;
+    }
+
     Ok(name)
 }
 

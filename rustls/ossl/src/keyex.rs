@@ -246,3 +246,37 @@ pub fn supported_kx_groups() -> Vec<&'static dyn SupportedKxGroup> {
     });
     groups.clone()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 8446 section 4.2.8.2 requires the key_exchange field of a
+    /// TLS 1.3 key share to carry the uncompressed form of the point,
+    /// 0x04 || X || Y. Peers that enforce it, Go's crypto/tls among them,
+    /// answer a compressed point with an illegal_parameter alert.
+    #[test]
+    fn test_ec_key_share_is_uncompressed() {
+        for (group, coordinate_len) in [
+            (&SECP256R1 as &dyn SupportedKxGroup, 32),
+            (&SECP384R1 as &dyn SupportedKxGroup, 48),
+            (&SECP521R1 as &dyn SupportedKxGroup, 66),
+        ] {
+            let kx = group.start().unwrap();
+            let pub_key = kx.pub_key();
+            assert_eq!(
+                pub_key.first(),
+                Some(&0x04),
+                "{:?} key share is not uncompressed: {:02x?}",
+                group.name(),
+                &pub_key[..1.min(pub_key.len())]
+            );
+            assert_eq!(
+                pub_key.len(),
+                1 + 2 * coordinate_len,
+                "{:?} key share has the wrong length",
+                group.name()
+            );
+        }
+    }
+}
