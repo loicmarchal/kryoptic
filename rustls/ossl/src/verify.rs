@@ -29,6 +29,10 @@ impl SignatureVerificationAlgorithm for OsslSigVerAlgorithm {
         self.signature
     }
 
+    fn fips(&self) -> bool {
+        crate::fips()
+    }
+
     fn verify_signature(
         &self,
         public_key: &[u8],
@@ -419,4 +423,24 @@ pub fn supported_algorithms() -> WebPkiSupportedAlgorithms {
         all: algs,
         mapping: mapping,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Without this the trait default of false applies, and because
+    /// WebPkiSupportedAlgorithms::fips() is an all() over the algorithms, a
+    /// single unimplemented method pulls CryptoProvider::fips() down with it:
+    /// a provider operating entirely inside a FIPS context reports otherwise,
+    /// and rustls turns off require_ems accordingly.
+    #[test]
+    fn sigver_fips_status_matches_context() {
+        let algorithms = supported_algorithms();
+        assert!(!algorithms.all.is_empty());
+        for algorithm in algorithms.all {
+            assert_eq!(algorithm.fips(), crate::fips());
+        }
+        assert_eq!(algorithms.fips(), crate::fips());
+    }
 }
